@@ -1,0 +1,42 @@
+[project]
+name = "filestore"
+version = "1.0.0"
+description = "Distributed Cloud File Storage Engine - presigned uploads, ltree folders, SHA-256 dedup"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+addopts = "-ra -q --strict-markers"
+markers = [
+    "integration: exercises Postgres, Redis and LocalStack together",
+]
+filterwarnings = [
+    "error::DeprecationWarning:app.*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "ASYNC", "S", "RUF"]
+ignore = ["B008", "S104", "RUF012", "UP046", "UP047"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S311"]
+"migrations/*" = ["E501", "F401"]
+"app/config.py" = ["S105"]
+"app/db/types.py" = ["N801"]
+"app/services/queue.py" = ["ASYNC109"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/worker/main.py"]

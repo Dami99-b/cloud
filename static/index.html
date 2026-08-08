@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cloud File Storage Engine</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          ink: { 900: '#070a0e', 800: '#0b1015', 700: '#111823', 600: '#18212e', 500: '#22303f' },
+          mint: '#5eead4',
+          sky: '#38bdf8',
+        },
+        fontFamily: {
+          sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+          mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        },
+      },
+    },
+  };
+</script>
+<style>
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: #0b1015; }
+  ::-webkit-scrollbar-thumb { background: #22303f; border-radius: 9999px; border: 2px solid #0b1015; }
+  .grid-bg {
+    background-image:
+      linear-gradient(to right, rgba(148,163,184,.06) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(148,163,184,.06) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+  .dropzone-active { border-color: #5eead4 !important; background: rgba(94,234,212,.06); }
+  @keyframes pulse-ring { 0%,100% { opacity: .35 } 50% { opacity: 1 } }
+  .badge-processing { animation: pulse-ring 1.4s ease-in-out infinite; }
+  .bar { transition: width .18s linear; }
+</style>
+</head>
+<body class="bg-ink-900 text-slate-200 font-sans antialiased min-h-screen grid-bg">
+
+<header class="border-b border-ink-500/70 bg-ink-800/80 backdrop-blur sticky top-0 z-20">
+  <div class="mx-auto max-w-7xl px-6 py-4 flex items-center gap-4">
+    <div class="flex items-center gap-3">
+      <img src="/static/favicon.svg" alt="" class="h-8 w-8" />
+      <div>
+        <h1 class="text-sm font-semibold tracking-tight text-white">Distributed Cloud File Storage</h1>
+        <p class="text-[11px] text-slate-500 font-mono" id="build-line">presigned uploads &middot; ltree folders &middot; sha-256 dedup</p>
+      </div>
+    </div>
+    <div class="ml-auto flex items-center gap-6 text-right">
+      <div><p class="text-[10px] uppercase tracking-widest text-slate-500">Files</p><p id="stat-files" class="text-sm font-mono text-white">0</p></div>
+      <div><p class="text-[10px] uppercase tracking-widest text-slate-500">Logical</p><p id="stat-logical" class="text-sm font-mono text-white">0 B</p></div>
+      <div><p class="text-[10px] uppercase tracking-widest text-slate-500">Stored</p><p id="stat-physical" class="text-sm font-mono text-white">0 B</p></div>
+      <div><p class="text-[10px] uppercase tracking-widest text-slate-500">Dedup saved</p><p id="stat-saved" class="text-sm font-mono text-mint">0 B</p></div>
+      <div class="flex items-center gap-2 pl-4 border-l border-ink-500">
+        <span id="queue-dot" class="h-2 w-2 rounded-full bg-slate-600"></span>
+        <span id="queue-line" class="text-[11px] font-mono text-slate-500">queue idle</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="mx-auto max-w-7xl px-6 py-8 grid grid-cols-12 gap-6">
+
+  <aside class="col-span-12 lg:col-span-3 space-y-4">
+    <section class="rounded-xl border border-ink-500/70 bg-ink-800/60 p-4">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-[11px] font-semibold uppercase tracking-widest text-slate-400">Folders</h2>
+        <button id="btn-new-folder" class="text-[11px] font-medium text-mint hover:text-white transition">+ New</button>
+      </div>
+      <div id="folder-tree" class="space-y-0.5 text-sm max-h-[420px] overflow-y-auto pr-1"></div>
+      <p class="mt-3 pt-3 border-t border-ink-500/60 text-[11px] font-mono text-slate-500">
+        path <span id="current-path" class="text-slate-300">root</span>
+      </p>
+    </section>
+
+    <section class="rounded-xl border border-ink-500/70 bg-ink-800/60 p-4 text-[11px] font-mono text-slate-500 space-y-1.5">
+      <p class="text-[11px] font-semibold uppercase tracking-widest text-slate-400 font-sans mb-2">Upload policy</p>
+      <p>threshold <span id="cfg-threshold" class="text-slate-300">50 MB</span></p>
+      <p>chunk <span id="cfg-chunk" class="text-slate-300">5 MB</span></p>
+      <p>max size <span id="cfg-max" class="text-slate-300">-</span></p>
+      <p>parallel parts <span class="text-slate-300">4</span></p>
+    </section>
+  </aside>
+
+  <section class="col-span-12 lg:col-span-9 space-y-6">
+
+    <div id="dropzone"
+         class="relative rounded-xl border-2 border-dashed border-ink-500 bg-ink-800/40 px-6 py-10 text-center transition cursor-pointer hover:border-slate-500">
+      <input id="file-input" type="file" multiple class="hidden" />
+      <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-full border border-ink-500 bg-ink-700">
+        <svg class="h-5 w-5 text-mint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 16V4m-4 4 4-4 4 4" /><path d="M4 14v3a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-3" />
+        </svg>
+      </div>
+      <p class="mt-4 text-sm text-slate-300">Drop files here, or <span class="text-mint font-medium">browse</span></p>
+      <p class="mt-1 text-[11px] font-mono text-slate-500">
+        under the threshold &rarr; single presigned PUT &middot; at or above &rarr; client-side chunking + multipart
+      </p>
+    </div>
+
+    <section id="uploads-panel" class="hidden rounded-xl border border-ink-500/70 bg-ink-800/60">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-ink-500/60">
+        <h2 class="text-[11px] font-semibold uppercase tracking-widest text-slate-400">Transfers</h2>
+        <button id="btn-clear-done" class="text-[11px] text-slate-500 hover:text-slate-300 transition">Clear finished</button>
+      </div>
+      <div id="uploads" class="divide-y divide-ink-500/50"></div>
+    </section>
+
+    <section class="rounded-xl border border-ink-500/70 bg-ink-800/60 overflow-hidden">
+      <div class="flex items-center gap-3 px-4 py-3 border-b border-ink-500/60">
+        <h2 class="text-[11px] font-semibold uppercase tracking-widest text-slate-400">Explorer</h2>
+        <label class="ml-auto flex items-center gap-2 text-[11px] text-slate-400">
+          <input id="chk-recursive" type="checkbox" class="h-3 w-3 rounded border-ink-500 bg-ink-700 accent-mint" />
+          include sub-folders
+        </label>
+        <input id="search" type="search" placeholder="filter by name"
+               class="w-48 rounded-md border border-ink-500 bg-ink-700 px-2.5 py-1.5 text-xs placeholder:text-slate-600 focus:border-mint focus:outline-none" />
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-[10px] uppercase tracking-widest text-slate-500 border-b border-ink-500/60">
+              <th class="px-4 py-2.5 font-medium">Name</th>
+              <th class="px-4 py-2.5 font-medium">Size</th>
+              <th class="px-4 py-2.5 font-medium">Status</th>
+              <th class="px-4 py-2.5 font-medium">SHA-256</th>
+              <th class="px-4 py-2.5 font-medium">Uploaded</th>
+              <th class="px-4 py-2.5 font-medium text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="file-rows" class="divide-y divide-ink-500/40"></tbody>
+        </table>
+      </div>
+      <div id="empty-state" class="hidden px-4 py-12 text-center text-sm text-slate-500">No files in this folder yet.</div>
+      <div class="flex items-center justify-between px-4 py-3 border-t border-ink-500/60 text-[11px] font-mono text-slate-500">
+        <span id="table-meta">0 files</span>
+        <span>polling every 3s</span>
+      </div>
+    </section>
+  </section>
+</main>
+
+<div id="toasts" class="fixed bottom-5 right-5 z-50 space-y-2 w-80"></div>
+
+<script>
+
+const API = '/api/v1';
+const PART_CONCURRENCY = 4;
+const PART_RETRIES = 3;
+const POLL_INTERVAL_MS = 3000;
+
+const state = {
+  config: {
+    multipart_threshold_bytes: 50 * 1024 * 1024,
+    multipart_chunk_size_bytes: 5 * 1024 * 1024,
+    max_file_size_bytes: 100 * 1024 * 1024 * 1024,
+  },
+  folders: [],
+  foldersById: new Map(),
+  currentFolderId: null,
+  currentPath: 'root',
+  files: [],
+  total: 0,
+  uploads: new Map(),
+  search: '',
+  recursive: false,
+  polling: null,
+};
+
+const $ = (id) => document.getElementById(id);
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (ch) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+  ));
+}
+
+function formatBytes(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB', 'PB'];
+  let value = n / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
+function formatWhen(iso) {
+  if (!iso) return '-';
+  const then = new Date(iso);
+  const diff = (Date.now() - then.getTime()) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return then.toLocaleDateString();
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(API + path, {
+    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    ...options,
+  });
+  if (response.status === 204) return null;
+  const raw = await response.text();
+  let data = null;
+  try { data = raw ? JSON.parse(raw) : null; } catch { data = null; }
+  if (!response.ok) {
+    const message = (data && data.error && data.error.message) || response.statusText;
+    throw new Error(message);
+  }
+  return data;
+}
+
+function toast(message, kind = 'info') {
+  const palette = {
+    info: 'border-ink-500 text-slate-300',
+    success: 'border-emerald-500/50 text-emerald-300',
+    error: 'border-rose-500/50 text-rose-300',
+  }[kind];
+  const el = document.createElement('div');
+  el.className = `rounded-lg border ${palette} bg-ink-800/95 px-3.5 py-2.5 text-xs shadow-lg`;
+  el.textContent = message;
+  $('toasts').appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; }, 4200);
+  setTimeout(() => el.remove(), 4600);
+}
+
+function putToS3(url, body, headers, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url, true);
+    Object.entries(headers || {}).forEach(([key, value]) => xhr.setRequestHeader(key, value));
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) onProgress(event.loaded);
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const etag = (xhr.getResponseHeader('ETag') || '').replace(/"/g, '');
+        if (onProgress) onProgress(body.size ?? body.byteLength ?? 0);
+        resolve(etag);
+      } else {
+        reject(new Error(`S3 responded ${xhr.status}: ${String(xhr.responseText).slice(0, 180)}`));
+      }
+    };
+    xhr.onerror = () => reject(new Error('network error while talking to object storage'));
+    xhr.onabort = () => reject(new Error('upload aborted'));
+    xhr.send(body);
+  });
+}
+
+async function runPool(items, limit, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
+let renderQueued = false;
+function scheduleUploadRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; renderUploads(); });
+}
+
+function renderUploads() {
+  const container = $('uploads');
+  const panel = $('uploads-panel');
+  const entries = [...state.uploads.values()];
+  panel.classList.toggle('hidden', entries.length === 0);
+
+  container.innerHTML = entries.map((entry) => {
+    const percent = entry.size ? Math.min(100, (entry.loaded / entry.size) * 100) : 0;
+    const tone = entry.status === 'error' ? 'bg-rose-500'
+      : entry.status === 'done' ? 'bg-emerald-400'
+      : 'bg-gradient-to-r from-sky to-mint';
+    const label = {
+      preparing: 'requesting presigned target',
+      uploading: entry.mode === 'MULTIPART'
+        ? `uploading ${entry.partsDone}/${entry.partsTotal} chunks`
+        : 'uploading',
+      finalizing: 'finalising with S3',
+      done: 'handed to pipeline',
+      error: entry.error || 'failed',
+    }[entry.status];
+
+    return `
+      <div class="px-4 py-3">
+        <div class="flex items-center gap-3">
+          <span class="truncate text-sm text-slate-200">${escapeHtml(entry.name)}</span>
+          <span class="rounded border border-ink-500 px-1.5 py-0.5 text-[10px] font-mono uppercase text-slate-400">
+            ${entry.mode === 'MULTIPART' ? 'multipart' : 'direct'}
+          </span>
+          <span class="ml-auto font-mono text-[11px] text-slate-500">
+            ${formatBytes(entry.loaded)} / ${formatBytes(entry.size)}
+          </span>
+          <span class="w-12 text-right font-mono text-[11px] ${entry.status === 'error' ? 'text-rose-400' : 'text-mint'}">
+            ${percent.toFixed(0)}%
+          </span>
+        </div>
+        <div class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-ink-600">
+          <div class="bar h-full ${tone}" style="width:${percent}%"></div>
+        </div>
+        <p class="mt-1.5 text-[11px] font-mono ${entry.status === 'error' ? 'text-rose-400' : 'text-slate-500'}">${escapeHtml(label)}</p>
+      </div>`;
+  }).join('');
+}
+
+async function uploadDirect(file, intent, entry) {
+  entry.status = 'uploading';
+  scheduleUploadRender();
+  await putToS3(intent.direct.url, file, intent.direct.headers, (loaded) => {
+    entry.loaded = loaded;
+    scheduleUploadRender();
+  });
+  return [];
+}
+
+async function uploadMultipart(file, intent, entry) {
+  const parts = intent.multipart.parts;
+  entry.status = 'uploading';
+  entry.partsTotal = parts.length;
+  entry.partsDone = 0;
+  const loadedPerPart = new Array(parts.length).fill(0);
+  scheduleUploadRender();
+
+  const completed = await runPool(parts, PART_CONCURRENCY, async (part, index) => {
+    const chunk = file.slice(part.offset, part.offset + part.size);
+    let lastError = null;
+    for (let attempt = 1; attempt <= PART_RETRIES; attempt += 1) {
+      try {
+        const etag = await putToS3(part.url, chunk, {}, (loaded) => {
+          loadedPerPart[index] = loaded;
+          entry.loaded = loadedPerPart.reduce((a, b) => a + b, 0);
+          scheduleUploadRender();
+        });
+        if (!etag) throw new Error(`part ${part.part_number} returned no ETag (check bucket CORS)`);
+        loadedPerPart[index] = part.size;
+        entry.partsDone += 1;
+        entry.loaded = loadedPerPart.reduce((a, b) => a + b, 0);
+        scheduleUploadRender();
+        return { part_number: part.part_number, etag };
+      } catch (err) {
+        lastError = err;
+        loadedPerPart[index] = 0;
+        if (attempt < PART_RETRIES) {
+          await new Promise((r) => setTimeout(r, 400 * attempt));
+        }
+      }
+    }
+    throw new Error(`chunk ${part.part_number} failed: ${lastError.message}`);
+  });
+
+  return completed;
+}
+
+async function startUpload(file) {
+  if (file.size === 0) { toast(`${file.name} is empty - skipped`, 'error'); return; }
+  if (file.size > state.config.max_file_size_bytes) {
+    toast(`${file.name} exceeds the ${formatBytes(state.config.max_file_size_bytes)} limit`, 'error');
+    return;
+  }
+
+  const key = crypto.randomUUID();
+  const entry = {
+    key, name: file.name, size: file.size, loaded: 0,
+    status: 'preparing', mode: null, fileId: null,
+    partsTotal: 0, partsDone: 0, error: null,
+  };
+  state.uploads.set(key, entry);
+  scheduleUploadRender();
+
+  try {
+    const intent = await api('/files/upload-intent', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: file.name,
+        size: file.size,
+        mime_type: file.type || null,
+        folder_id: state.currentFolderId,
+      }),
+    });
+
+    entry.fileId = intent.file_id;
+    entry.mode = intent.upload_type;
+    scheduleUploadRender();
+
+    const parts = intent.upload_type === 'MULTIPART'
+      ? await uploadMultipart(file, intent, entry)
+      : await uploadDirect(file, intent, entry);
+
+    entry.status = 'finalizing';
+    entry.loaded = entry.size;
+    scheduleUploadRender();
+
+    await api('/files/complete-upload', {
+      method: 'POST',
+      body: JSON.stringify({ file_id: intent.file_id, parts }),
+    });
+
+    entry.status = 'done';
+    scheduleUploadRender();
+    toast(`${file.name} uploaded - processing`, 'success');
+    await refreshFiles();
+  } catch (err) {
+    entry.status = 'error';
+    entry.error = err.message;
+    scheduleUploadRender();
+    toast(`${file.name}: ${err.message}`, 'error');
+    if (entry.fileId) {
+      try { await api(`/files/${entry.fileId}/abort`, { method: 'POST' }); } catch {}
+    }
+  }
+}
+
+function handleFiles(fileList) {
+  const files = [...fileList];
+  if (!files.length) return;
+  const heavy = files.filter((f) => f.size >= state.config.multipart_threshold_bytes).length;
+  if (heavy) {
+    toast(`${heavy} file(s) at or above ${formatBytes(state.config.multipart_threshold_bytes)} - using chunked multipart`, 'info');
+  }
+  files.forEach((file) => { startUpload(file); });
+}
+
+function renderFolderTree(nodes, depth = 0) {
+  return nodes.map((node) => {
+    const active = node.id === state.currentFolderId
+      || (state.currentFolderId === null && node.is_root);
+    return `
+      <div>
+        <div class="group flex items-center gap-1.5 rounded-md px-2 py-1.5 cursor-pointer transition
+                    ${active ? 'bg-ink-600 text-white' : 'text-slate-400 hover:bg-ink-700 hover:text-slate-200'}"
+             style="padding-left:${8 + depth * 14}px" data-folder-id="${node.id}" data-folder-path="${escapeHtml(node.path)}">
+          <svg class="h-3.5 w-3.5 shrink-0 ${active ? 'text-mint' : 'text-slate-600'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/>
+          </svg>
+          <span class="truncate">${escapeHtml(node.name)}</span>
+          ${node.file_count ? `<span class="ml-1 font-mono text-[10px] text-slate-600">${node.file_count}</span>` : ''}
+          ${node.is_root ? '' : `<button class="ml-auto hidden group-hover:block text-[11px] text-slate-600 hover:text-rose-400" data-delete-folder="${node.id}" title="Delete folder and everything under it">&times;</button>`}
+        </div>
+        ${node.children && node.children.length ? renderFolderTree(node.children, depth + 1) : ''}
+      </div>`;
+  }).join('');
+}
+
+async function refreshFolders() {
+  const tree = await api('/folders/tree');
+  state.folders = tree;
+  state.foldersById = new Map();
+  const walk = (nodes) => nodes.forEach((n) => { state.foldersById.set(n.id, n); walk(n.children || []); });
+  walk(tree);
+  $('folder-tree').innerHTML = renderFolderTree(tree);
+  const current = state.currentFolderId ? state.foldersById.get(state.currentFolderId) : tree[0];
+  $('current-path').textContent = current ? current.path : 'root';
+}
+
+function statusBadge(file) {
+  const map = {
+    PENDING: ['border-slate-600 text-slate-400', ''],
+    UPLOADING: ['border-sky/40 text-sky', ''],
+    PROCESSING: ['border-amber-500/50 text-amber-300', 'badge-processing'],
+    READY: ['border-emerald-500/50 text-emerald-300', ''],
+    FAILED: ['border-rose-500/50 text-rose-300', ''],
+  };
+  const [tone, extra] = map[file.status] || map.PENDING;
+  return `<span class="rounded border ${tone} ${extra} px-1.5 py-0.5 font-mono text-[10px] tracking-wide">[${file.status}]</span>`;
+}
+
+function dedupCell(file) {
+  if (!file.checksum_sha256) {
+    return '<span class="font-mono text-[11px] text-slate-600">hashing…</span>';
+  }
+  const short = file.checksum_sha256.slice(0, 12);
+  const badge = file.is_duplicate
+    ? '<span class="ml-2 rounded border border-mint/40 px-1.5 py-0.5 font-mono text-[10px] text-mint" title="Soft-linked to an existing S3 object">DEDUPED</span>'
+    : '<span class="ml-2 rounded border border-ink-500 px-1.5 py-0.5 font-mono text-[10px] text-slate-500" title="Canonical copy for this digest">UNIQUE</span>';
+  return `<span class="font-mono text-[11px] text-slate-400" title="${escapeHtml(file.checksum_sha256)}">${short}…</span>${badge}`;
+}
+
+function renderFiles() {
+  const rows = state.files.map((file) => `
+    <tr class="hover:bg-ink-700/40 transition">
+      <td class="px-4 py-2.5">
+        <div class="flex items-center gap-2.5">
+          <span class="flex h-6 w-6 items-center justify-center rounded border border-ink-500 bg-ink-700 text-[10px] font-mono uppercase text-slate-500">
+            ${escapeHtml((file.metadata && file.metadata.extension) || file.name.split('.').pop().slice(0, 3) || '?')}
+          </span>
+          <div class="min-w-0">
+            <p class="truncate text-slate-200">${escapeHtml(file.name)}</p>
+            <p class="truncate font-mono text-[10px] text-slate-600">${escapeHtml(file.folder_path || '')}</p>
+          </div>
+        </div>
+      </td>
+      <td class="px-4 py-2.5 font-mono text-xs text-slate-400">${formatBytes(file.size_bytes)}</td>
+      <td class="px-4 py-2.5">${statusBadge(file)}</td>
+      <td class="px-4 py-2.5">${dedupCell(file)}</td>
+      <td class="px-4 py-2.5 text-xs text-slate-500">${formatWhen(file.uploaded_at || file.created_at)}</td>
+      <td class="px-4 py-2.5 text-right whitespace-nowrap">
+        ${file.status === 'READY'
+          ? `<button class="text-[11px] text-sky hover:text-white transition" data-download="${file.id}">download</button>`
+          : '<span class="text-[11px] text-slate-700">download</span>'}
+        <button class="ml-3 text-[11px] text-slate-500 hover:text-rose-400 transition" data-delete-file="${file.id}">delete</button>
+      </td>
+    </tr>`).join('');
+
+  $('file-rows').innerHTML = rows;
+  $('empty-state').classList.toggle('hidden', state.files.length > 0);
+  $('table-meta').textContent = `${state.total} file${state.total === 1 ? '' : 's'}`;
+}
+
+async function refreshFiles() {
+  const params = new URLSearchParams({ limit: '100', offset: '0' });
+  if (state.currentFolderId) params.set('folder_id', state.currentFolderId);
+  if (state.recursive) params.set('recursive', 'true');
+  if (state.search) params.set('search', state.search);
+  const page = await api(`/files?${params.toString()}`);
+  state.files = page.items;
+  state.total = page.total;
+  renderFiles();
+}
+
+async function refreshStats() {
+  const stats = await api('/files/stats');
+  $('stat-files').textContent = stats.total_files;
+  $('stat-logical').textContent = formatBytes(stats.logical_bytes);
+  $('stat-physical').textContent = formatBytes(stats.physical_bytes);
+  $('stat-saved').textContent = formatBytes(stats.deduplicated_bytes);
+}
+
+async function refreshQueue() {
+  try {
+    const depth = await api('/queue');
+    const busy = depth.pending + depth.processing;
+    $('queue-dot').className = `h-2 w-2 rounded-full ${busy ? 'bg-amber-400 badge-processing' : 'bg-emerald-500'}`;
+    $('queue-line').textContent = busy
+      ? `queue ${depth.pending} pending / ${depth.processing} in flight`
+      : (depth.dead ? `queue idle (${depth.dead} dead)` : 'queue idle');
+  } catch {
+    $('queue-dot').className = 'h-2 w-2 rounded-full bg-rose-500';
+    $('queue-line').textContent = 'queue unreachable';
+  }
+}
+
+async function poll() {
+  if (document.hidden) return;
+  try {
+    await Promise.all([refreshFiles(), refreshStats(), refreshQueue()]);
+  } catch (err) {
+    console.warn('poll failed', err);
+  }
+}
+
+function wireDropzone() {
+  const zone = $('dropzone');
+  const input = $('file-input');
+
+  zone.addEventListener('click', () => input.click());
+  input.addEventListener('change', (event) => {
+    handleFiles(event.target.files);
+    input.value = '';
+  });
+
+  ['dragenter', 'dragover'].forEach((type) => {
+    zone.addEventListener(type, (event) => {
+      event.preventDefault();
+      zone.classList.add('dropzone-active');
+    });
+  });
+  ['dragleave', 'drop'].forEach((type) => {
+    zone.addEventListener(type, (event) => {
+      event.preventDefault();
+      if (type === 'dragleave' && zone.contains(event.relatedTarget)) return;
+      zone.classList.remove('dropzone-active');
+    });
+  });
+  zone.addEventListener('drop', (event) => {
+    event.preventDefault();
+    handleFiles(event.dataTransfer.files);
+  });
+
+  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('drop', (e) => e.preventDefault());
+}
+
+function wireControls() {
+  $('btn-new-folder').addEventListener('click', async () => {
+    const name = window.prompt('Folder name');
+    if (!name) return;
+    try {
+      await api('/folders', {
+        method: 'POST',
+        body: JSON.stringify({ name, parent_id: state.currentFolderId }),
+      });
+      await refreshFolders();
+      toast(`Created ${name}`, 'success');
+    } catch (err) { toast(err.message, 'error'); }
+  });
+
+  $('folder-tree').addEventListener('click', async (event) => {
+    const deleteTarget = event.target.closest('[data-delete-folder]');
+    if (deleteTarget) {
+      event.stopPropagation();
+      const id = deleteTarget.dataset.deleteFolder;
+      const node = state.foldersById.get(id);
+      if (!window.confirm(`Delete "${node.name}" and everything inside it?`)) return;
+      try {
+        const result = await api(`/folders/${id}`, { method: 'DELETE' });
+        if (state.currentFolderId === id) state.currentFolderId = null;
+        await refreshFolders();
+        await refreshFiles();
+        toast(`Removed ${result.deleted_folder_ids.length} folder(s), ${result.deleted_file_ids.length} file(s)`, 'success');
+      } catch (err) { toast(err.message, 'error'); }
+      return;
+    }
+
+    const row = event.target.closest('[data-folder-id]');
+    if (!row) return;
+    state.currentFolderId = row.dataset.folderId;
+    $('current-path').textContent = row.dataset.folderPath;
+    await refreshFolders();
+    await refreshFiles();
+  });
+
+  $('file-rows').addEventListener('click', async (event) => {
+    const download = event.target.closest('[data-download]');
+    if (download) {
+      try {
+        const result = await api(`/files/${download.dataset.download}/download`);
+        window.open(result.url, '_blank', 'noopener');
+      } catch (err) { toast(err.message, 'error'); }
+      return;
+    }
+    const remove = event.target.closest('[data-delete-file]');
+    if (remove) {
+      if (!window.confirm('Delete this file?')) return;
+      try {
+        await api(`/files/${remove.dataset.deleteFile}`, { method: 'DELETE' });
+        await Promise.all([refreshFiles(), refreshStats()]);
+        toast('File deleted', 'success');
+      } catch (err) { toast(err.message, 'error'); }
+    }
+  });
+
+  $('chk-recursive').addEventListener('change', (event) => {
+    state.recursive = event.target.checked;
+    refreshFiles();
+  });
+
+  let searchTimer = null;
+  $('search').addEventListener('input', (event) => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      state.search = event.target.value.trim();
+      refreshFiles();
+    }, 250);
+  });
+
+  $('btn-clear-done').addEventListener('click', () => {
+    [...state.uploads.entries()].forEach(([key, entry]) => {
+      if (entry.status === 'done' || entry.status === 'error') state.uploads.delete(key);
+    });
+    renderUploads();
+  });
+
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+}
+
+async function boot() {
+  wireDropzone();
+  wireControls();
+
+  try {
+    state.config = await api('/config');
+    $('cfg-threshold').textContent = formatBytes(state.config.multipart_threshold_bytes);
+    $('cfg-chunk').textContent = formatBytes(state.config.multipart_chunk_size_bytes);
+    $('cfg-max').textContent = formatBytes(state.config.max_file_size_bytes);
+    $('build-line').textContent = `v${state.config.version} · ${state.config.environment} · bucket ${state.config.s3_bucket}`;
+  } catch (err) {
+    toast(`Could not load config: ${err.message}`, 'error');
+  }
+
+  try {
+    await refreshFolders();
+    await poll();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+
+  state.polling = setInterval(poll, POLL_INTERVAL_MS);
+}
+
+boot();
+</script>
+</body>
+</html>

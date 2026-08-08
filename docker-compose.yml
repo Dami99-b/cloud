@@ -1,0 +1,127 @@
+x-app-env: &app-env
+  ENVIRONMENT: local
+  LOG_LEVEL: INFO
+  DATABASE_URL: postgresql+asyncpg://filestore:filestore@postgres:5432/filestore
+  REDIS_URL: redis://redis:6379/0
+  S3_ENDPOINT_URL: http://localstack:4566
+  S3_PUBLIC_ENDPOINT_URL: http://localhost:4566
+  S3_BUCKET: user-uploads
+  S3_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  AWS_DEFAULT_REGION: us-east-1
+  MULTIPART_THRESHOLD_BYTES: "52428800"
+  MULTIPART_CHUNK_SIZE_BYTES: "5242880"
+  PRESIGN_EXPIRY_SECONDS: "3600"
+  WORKER_CONCURRENCY: "4"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: filestore-postgres
+    environment:
+      POSTGRES_USER: filestore
+      POSTGRES_PASSWORD: filestore
+      POSTGRES_DB: filestore
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/postgres/init-extensions.sql:/docker-entrypoint-initdb.d/00-extensions.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U filestore -d filestore"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: filestore-redis
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  localstack:
+    image: localstack/localstack:3.8
+    container_name: filestore-localstack
+    environment:
+      SERVICES: s3
+      DEBUG: "0"
+      PERSISTENCE: "0"
+      S3_BUCKET: user-uploads
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    ports:
+      - "4566:4566"
+    volumes:
+      - ./scripts/localstack/init-s3.sh:/etc/localstack/init/ready.d/init-s3.sh:ro
+      - localstack-data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD-SHELL", "awslocal s3 ls s3://user-uploads >/dev/null 2>&1 || exit 1"]
+      interval: 6s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: filestore-api
+    command: ["api"]
+    environment:
+      <<: *app-env
+      WEB_CONCURRENCY: "1"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: filestore-worker
+    command: ["worker"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
+volumes:
+  postgres-data:
+  redis-data:
+  localstack-data:
